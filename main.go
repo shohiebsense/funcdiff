@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -42,6 +43,17 @@ type PackageStats struct {
 	Changed int
 }
 
+type TsExtractedMethod struct {
+	Kind          string `json:"kind"`          // "controller" or "service" or "function"
+	ClassName     string `json:"className"`     // e.g. "UserController"
+	MethodName    string `json:"methodName"`    // e.g. "findOne"
+	Signature     string `json:"signature"`     // "(id: string) => Promise<UserDto>"
+	Exported      bool   `json:"exported"`
+	StartLine     int    `json:"startLine"`
+	EndLine       int    `json:"endLine"`
+	LineCount     int    `json:"lineCount"`
+}
+
 func main() {
 	dirFlag := flag.String("dir", "", "Path to the git repository (optional). If empty, use current working directory.")
 	fromRef := flag.String("from", "development", "Git ref to compare from (e.g. branch, tag, commit)")
@@ -50,6 +62,7 @@ func main() {
 	summaryOnly := flag.Bool("summary-only", false, "Show only summary and package-level stats (no detailed function lists)")
 	pkgFilter := flag.String("package", "", "Optional substring filter for package path (e.g. 'internal/' or 'pkg/foo')")
 	outDir := flag.String("out-dir", "", "If set, write each changed function report as its own Markdown file in this directory")
+	lang := flag.String("lang", "go", "Language mode: go or ts")
 	flag.Parse()
 
 	// If --dir is provided, change working directory first
@@ -66,15 +79,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	fromFuncs, err := collectFuncs(*fromRef, repoRoot, *onlyExported, *pkgFilter)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error collecting functions from %s: %v\n", *fromRef, err)
-		os.Exit(1)
-	}
+	var (
+		fromFuncs FuncSet
+		toFuncs   FuncSet
+	)
 
-	toFuncs, err := collectFuncs(*toRef, repoRoot, *onlyExported, *pkgFilter)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error collecting functions from %s: %v\n", *toRef, err)
+	
+
+	switch *lang {
+	case "go":
+		fromFuncs, err = collectGoFuncs(*fromRef, repoRoot, *onlyExported, *pkgFilter)
+		if err != nil { 
+			fmt.Fprintf(os.Stderr, "Error collecting functions from %s: %v\n", *fromRef, err)
+		}
+		toFuncs, err = collectGoFuncs(*toRef, repoRoot, *onlyExported, *pkgFilter)
+		if err != nil { 
+			fmt.Fprintf(os.Stderr, "Error collecting functions from %s: %v\n", *toRef, err)
+		 }
+
+	case "ts":
+		fromFuncs, err = collectTsFuncs(*fromRef, repoRoot, *pkgFilter)
+		if err != nil { 
+			fmt.Fprintf(os.Stderr, "Error collecting functions from %s: %v\n", *fromRef, err)
+		 }
+		toFuncs, err = collectTsFuncs(*toRef, repoRoot, *pkgFilter)
+		if err != nil { 
+			fmt.Fprintf(os.Stderr, "Error collecting functions from %s: %v\n", *toRef, err)
+		 }
+
+	default:
+		fmt.Fprintf(os.Stderr, "unsupported --lang %q (use go or ts)\n", *lang)
 		os.Exit(1)
 	}
 
@@ -126,7 +160,7 @@ func gitShowFile(ref, path string) ([]byte, error) {
 }
 
 // collectFuncs parses Go files from a ref and builds a FuncSet.
-func collectFuncs(ref, repoRoot string, onlyExported bool, pkgFilter string) (FuncSet, error) {
+func collectGoFuncs(ref, repoRoot string, onlyExported bool, pkgFilter string) (FuncSet, error) {
 	files, err := gitListGoFiles(ref)
 	if err != nil {
 		return nil, err
@@ -751,4 +785,142 @@ func normalizeBody(s string) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func collectTsFuncs(ref, repoRoot, pkgFilter string) (FuncSet, error) {
+	files, err := gitListTsFiles(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	funcs := make(FuncSet)
+
+	for _, path := range files {
+		src, err := gitShowFile(ref, path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping %s@%s: %v\n", path, ref, err)
+			continue
+		}
+
+		infos, err := extractTsMethods(path, src)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: TS parse failed for %s@%s: %v\n", path, ref, err)
+			continue
+		}
+
+		for _, info := range infos {
+			// pkg/path can be roughly the directory
+			pkgPath := filepath.Dir(path)
+			if pkgFilter != "" && !strings.Contains(pkgPath, pkgFilter) {
+				continue
+			}
+
+			// Map into FuncInfo
+			fi := &FuncInfo{
+				Package:   pkgPath,
+				File:      path,
+				Name:      info.MethodName,
+				Receiver:  info.ClassName, // treat class as receiver
+				Signature: info.Signature,
+				Exported:  info.Exported,
+				StartLine: info.StartLine,
+				EndLine:   info.EndLine,
+				LineCount: info.LineCount,
+			}
+
+			key := FuncKey{
+				Package:  pkgPath,
+				Receiver: fi.Receiver,
+				Name:     fi.Name,
+			}
+			funcs[key] = fi
+		}
+	}
+
+	return funcs, nil
+}
+
+func gitListTsFiles(ref string) ([]string, error) {
+	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", ref)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree failed for ref %s: %w", ref, err)
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var files []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if strings.HasSuffix(l, ".ts") &&
+			!strings.HasSuffix(l, ".spec.ts") &&
+			!strings.HasSuffix(l, ".test.ts") {
+			files = append(files, l)
+		}
+	}
+	return files, nil
+}
+
+func extractTsMethods(path string, src []byte) ([]TsExtractedMethod, error) {
+	scriptPath, err := tsExtractScriptPath()
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.Command("node", scriptPath, path)
+	cmd.Stdin = bytes.NewReader(src)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return nil, fmt.Errorf("ts-extract failed for %s: %v: %s", path, err, msg)
+		}
+		return nil, fmt.Errorf("ts-extract failed for %s: %v", path, err)
+	}
+
+	out := stdout.Bytes()
+	if len(out) == 0 {
+		// No methods found, that's fine.
+		return nil, nil
+	}
+
+	var methods []TsExtractedMethod
+	if err := json.Unmarshal(out, &methods); err != nil {
+		return nil, fmt.Errorf("unmarshal ts-extract output for %s: %w", path, err)
+	}
+	return methods, nil
+}
+
+func tsExtractScriptPath() (string, error) {
+	// Try to find ts-extract.js in the same directory as the binary.
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine executable path: %w", err)
+	}
+	exeDir := filepath.Dir(exePath)
+
+	// Assume ts-extract.js is next to the binary.
+	scriptPath := filepath.Join(exeDir, "ts-extract.js")
+	if _, err := os.Stat(scriptPath); err == nil {
+		return scriptPath, nil
+	}
+
+	// Fallback: during development, when running `go run main.go`,
+	// exePath can be a temp file. In that case, optionally look relative
+	// to the current working directory (where main.go likely lives).
+	cwd, err := os.Getwd()
+	if err == nil {
+		alt := filepath.Join(cwd, "ts-extract.js")
+		if _, err := os.Stat(alt); err == nil {
+			return alt, nil
+		}
+	}
+
+	return "", fmt.Errorf("ts-extract.js not found next to binary or in current dir")
 }

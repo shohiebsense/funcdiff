@@ -34,4 +34,62 @@ go.work.sum
 report.md
 changed_funcs
 funcdiff
+changed_funcs_ts
 
+# appss
+config/*
+!config/config*
+!config/sample*
+!config/keys/jwt/.gitkeep
+.env
+
+# unignore
+!config/development*
+!config/production*
+!config/keys*
+
+# compiled output
+/dist
+/node_modules
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+
+# Tests
+/coverage
+/.nyc_output
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+package-lock.json
+
+# Uploaded & Generated File
+storage/upload/*
+!storage/upload/.gitkeep
+storage/playground/jwt/*
+!storage/playground/jwt/.gitkeep
+
+# Documentation
+documentation
+documentation2

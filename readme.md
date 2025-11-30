@@ -63,6 +63,25 @@ you can run:
 
 ```bash
 ./funcdiff \
-  --dir /Users/user/Projects/go/jaklingko-service-ticket \
+  --lang ts \
+  --dir /Users/user/Projects/go/service-ticket \
+  --from development \
+  --to master \
   --out-dir /Users/user/Projects/go/funcdiff/changed_funcs \
-  --summary-only > ./jaklingko-service-ticket-report.md
+  --summary-only > ./service-ticket-report.md
+```
+
+nestjs  
+
+npm i first  
+
+```bash
+./funcdiff \
+--lang ts \
+--dir . \
+--dir /Users/user/Projects/javascript/service-auth \
+--from development \
+--to master \
+--out-dir Users/user/Projects/go/funcdiff/changed_funcs_ts \
+--summary-only > ./jaklingko-service-auth.md
+```
